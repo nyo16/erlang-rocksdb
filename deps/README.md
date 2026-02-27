@@ -2,7 +2,7 @@ This directory contains all erlang-rocksdb dependencies, except for the libc and
 
 ## Dependencies
 
-- **rocksdb** 10.7.5: key-value storage engine
+- **rocksdb** 10.10.1: key-value storage engine
 - **lz4** 1.8.3: compression library
 - **snappy**: compression library
 - **CRoaring** 4.5.1: roaring bitmap library (used for posting list V2 format)

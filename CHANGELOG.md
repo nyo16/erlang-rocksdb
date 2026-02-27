@@ -1,3 +1,13 @@
+## erlang-rocksdb 2.5.1, released on 2026/02/27
+
+### Dependencies
+
+- update RocksDB from 10.7.5 to 10.10.1
+  - 10.8.0: new FlushWAL overload, temperature option in CompactionOptions
+  - 10.9.0: manifest auto-tuning, target_file_size_is_upper_bound option
+  - 10.10.0: bug fixes (best-efforts recovery, resumable compaction, IO uring)
+  - 10.10.1: bug fixes (Windows VS 2022 build)
+
 ## erlang-rocksdb 2.5.0, released on 2026/01/07
 
 ### New Features
