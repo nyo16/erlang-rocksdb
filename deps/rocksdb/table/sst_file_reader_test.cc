@@ -164,7 +164,7 @@ TEST_F(SstFileReaderTest, ReadFileWithGlobalSeqno) {
   Options options;
   options.create_if_missing = true;
   std::string db_name = test::PerThreadDBPath("test_db");
-  DB* db;
+  std::unique_ptr<DB> db;
   ASSERT_OK(DB::Open(options, db_name, &db));
   // Bump sequence number.
   ASSERT_OK(db->Put(WriteOptions(), keys[0], "foo"));
@@ -186,7 +186,7 @@ TEST_F(SstFileReaderTest, ReadFileWithGlobalSeqno) {
     }
   }
   ASSERT_FALSE(ingested_file.empty());
-  delete db;
+  db.reset();
 
   // Verify the file can be open and read by SstFileReader.
   CheckFile(db_name + ingested_file, keys, true /* check_global_seqno */);
@@ -801,6 +801,7 @@ TEST_F(SstFileReaderTableMultiGetTest, Basic) {
   options.comparator = ucmp;
   options.disable_auto_compactions = true;
   options.merge_operator = MergeOperators::CreateStringAppendOperator();
+  options.statistics = CreateDBStatistics();
   BlockBasedTableOptions bbto;
   bbto.filter_policy.reset(NewBloomFilterPolicy(10, false));
   options.table_factory.reset(NewBlockBasedTableFactory(bbto));
@@ -830,6 +831,8 @@ TEST_F(SstFileReaderTableMultiGetTest, Basic) {
   ASSERT_OK(reader.Open(file_name));
   ASSERT_OK(reader.VerifyChecksum());
 
+  ASSERT_OK(options.statistics->Reset());
+
   std::vector<Slice> keys;
   std::vector<std::string> values;
 
@@ -849,6 +852,10 @@ TEST_F(SstFileReaderTableMultiGetTest, Basic) {
   ASSERT_EQ("val2", values[3]);
   ASSERT_TRUE(statuses[4].ok());
   ASSERT_EQ("val4,val5", values[4]);
+
+  uint64_t cache_hits = options.statistics->getTickerCount(BLOCK_CACHE_HIT);
+  uint64_t cache_misses = options.statistics->getTickerCount(BLOCK_CACHE_MISS);
+  ASSERT_GT(cache_hits + cache_misses, 0);
 
   dbfull()->ReleaseSnapshot(snapshot1);
   dbfull()->ReleaseSnapshot(snapshot2);

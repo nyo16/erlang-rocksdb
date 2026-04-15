@@ -332,6 +332,8 @@ class StressTest {
 
   Status TestDisableManualCompaction(ThreadState* thread);
 
+  Status TestAbortAndResumeCompactions(ThreadState* thread);
+
   void TestAcquireSnapshot(ThreadState* thread, int rand_column_family,
                            const std::string& keystr, uint64_t i);
 
@@ -402,6 +404,7 @@ class StressTest {
   std::shared_ptr<Cache> cache_;
   std::shared_ptr<Cache> compressed_cache_;
   std::shared_ptr<const FilterPolicy> filter_policy_;
+  std::unique_ptr<DB> db_owner_;
   DB* db_;
   TransactionDB* txn_db_;
   OptimisticTransactionDB* optimistic_txn_db_;
@@ -420,7 +423,7 @@ class StressTest {
   std::atomic<bool> db_preload_finished_;
   std::shared_ptr<SstQueryFilterConfigsManager::Factory> sqfc_factory_;
 
-  DB* secondary_db_;
+  std::unique_ptr<DB> secondary_db_;
   std::vector<ColumnFamilyHandle*> secondary_cfhs_;
   bool is_db_stopped_;
 };

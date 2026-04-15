@@ -101,7 +101,7 @@ TEST_F(DBFlushTest, SyncFail) {
   TEST_SYNC_POINT("DBFlushTest::SyncFail:2");
   fault_injection_env->SetFilesystemActive(true);
   // Now the background job will do the flush; wait for it.
-  // Returns the IO error happend during flush.
+  // Returns the IO error happened during flush.
   ASSERT_NOK(dbfull()->TEST_WaitForFlushMemTable());
   ASSERT_EQ("", FilesPerLevel());  // flush failed.
   Destroy(options);
@@ -518,11 +518,11 @@ TEST_F(DBFlushTest, StatisticsGarbageInsertAndDeletes) {
   // Note : one set of delete for KEY1, KEY2, KEY3 is written to
   // SSTable to propagate the delete operations to K-V pairs
   // that could have been inserted into the database during past Flush
-  // opeartions.
+  // operations.
   EXPECTED_MEMTABLE_GARBAGE_BYTES_AT_FLUSH -=
       KEY1.size() + KEY2.size() + KEY3.size() + 3 * sizeof(uint64_t);
 
-  // Additional useful paylaod.
+  // Additional useful payload.
   ASSERT_OK(Delete(KEY4));
   ASSERT_OK(Delete(KEY5));
   ASSERT_OK(Delete(KEY6));
@@ -614,7 +614,7 @@ TEST_F(DBFlushTest, StatisticsGarbageRangeDeletes) {
 
   // Note : one set of deleteRange for (KEY1, KEY2) and (KEY2, KEY3) is written
   // to SSTable to propagate the deleteRange operations to K-V pairs that could
-  // have been inserted into the database during past Flush opeartions.
+  // have been inserted into the database during past Flush operations.
   EXPECTED_MEMTABLE_GARBAGE_BYTES_AT_FLUSH -=
       (KEY1.size() + KEY2.size() + sizeof(uint64_t)) +
       (KEY2.size() + KEY3.size() + sizeof(uint64_t));
@@ -709,7 +709,7 @@ class TestFlushListener : public EventListener {
     // that assumption does not hold (see the test case MultiDBMultiListeners
     // below).
     ASSERT_TRUE(test_);
-    if (db == test_->db_) {
+    if (db == test_->db_.get()) {
       std::vector<std::vector<FileMetaData>> files_by_level;
       test_->dbfull()->TEST_GetFilesMetaData(db->DefaultColumnFamily(),
                                              &files_by_level);
@@ -842,7 +842,7 @@ TEST_F(DBFlushTest, FixFlushReasonRaceFromConcurrentFlushes) {
     ASSERT_OK(Put(1, Key(idx), std::string(1, 'v')));
   }
 
-  // To coerce a manual flush happenning in the middle of GetLiveFiles's flush,
+  // To coerce a manual flush happening in the middle of GetLiveFiles's flush,
   // we need to pause background flush thread and enable it later.
   std::shared_ptr<test::SleepingBackgroundTask> sleeping_task =
       std::make_shared<test::SleepingBackgroundTask>();
@@ -851,7 +851,7 @@ TEST_F(DBFlushTest, FixFlushReasonRaceFromConcurrentFlushes) {
                  sleeping_task.get(), Env::Priority::HIGH);
   sleeping_task->WaitUntilSleeping();
 
-  // Coerce a manual flush happenning in the middle of GetLiveFiles's flush
+  // Coerce a manual flush happening in the middle of GetLiveFiles's flush
   bool get_live_files_paused_at_sync_point = false;
   ROCKSDB_NAMESPACE::SyncPoint::GetInstance()->SetCallBack(
       "DBImpl::AtomicFlushMemTables:AfterScheduleFlush", [&](void* /* arg */) {
@@ -1428,7 +1428,7 @@ TEST_F(DBFlushTest, MemPurgeDeleteAndDeleteRange) {
   Close();
 }
 
-// Create a Compaction Fitler that will be invoked
+// Create a Compaction Filter that will be invoked
 // at flush time and will update the value of a KV pair
 // if the key string is "lower" than the filter_key_ string.
 class ConditionalUpdateFilter : public CompactionFilter {
@@ -2533,7 +2533,7 @@ TEST_F(DBFlushTest, TombstoneVisibleInSnapshot) {
 
   ASSERT_OK(db_->Put(WriteOptions(), "foo", "value0"));
 
-  ManagedSnapshot snapshot_guard(db_);
+  ManagedSnapshot snapshot_guard(db_.get());
 
   ColumnFamilyHandle* default_cf = db_->DefaultColumnFamily();
   ASSERT_OK(db_->Flush(FlushOptions(), default_cf));
@@ -2574,7 +2574,7 @@ TEST_P(DBAtomicFlushTest, ManualFlushUnder2PC) {
   txn_db_opts.write_policy = TxnDBWritePolicy::WRITE_COMMITTED;
   ASSERT_OK(TransactionDB::Open(options, txn_db_opts, dbname_, &txn_db));
   ASSERT_NE(txn_db, nullptr);
-  db_ = txn_db;
+  db_.reset(txn_db);
 
   // Create two more columns other than default CF.
   std::vector<std::string> cfs = {"puppy", "kitty"};
@@ -2638,9 +2638,8 @@ TEST_P(DBAtomicFlushTest, ManualFlushUnder2PC) {
   // it means atomic flush didn't write the min_log_number_to_keep to MANIFEST.
   cfs.push_back(kDefaultColumnFamilyName);
   ASSERT_OK(TryReopenWithColumnFamilies(cfs, options));
-  DBImpl* db_impl = static_cast<DBImpl*>(db_);
-  ASSERT_TRUE(db_impl->allow_2pc());
-  ASSERT_NE(db_impl->MinLogNumberToKeep(), 0);
+  ASSERT_TRUE(dbfull()->allow_2pc());
+  ASSERT_NE(dbfull()->MinLogNumberToKeep(), 0);
 }
 
 TEST_P(DBAtomicFlushTest, ManualAtomicFlush) {

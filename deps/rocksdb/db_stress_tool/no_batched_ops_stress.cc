@@ -234,8 +234,9 @@ class NonBatchedOpsStressTest : public StressTest {
 
           Status s = secondary_db_->TryCatchUpWithPrimary();
 #ifndef NDEBUG
-          uint64_t manifest_num = static_cast_with_check<DBImpl>(secondary_db_)
-                                      ->TEST_Current_Manifest_FileNo();
+          uint64_t manifest_num =
+              static_cast_with_check<DBImpl>(secondary_db_.get())
+                  ->TEST_Current_Manifest_FileNo();
 #else
           uint64_t manifest_num = 0;
 #endif
@@ -1903,6 +1904,17 @@ class NonBatchedOpsStressTest : public StressTest {
 
     } while (!s.ok() && IsErrorInjectedAndRetryable(s) &&
              initial_wal_write_may_succeed);
+
+    if ((s.IsDeadlock() || s.IsTimedOut()) &&
+        (FLAGS_use_multiget || FLAGS_use_multi_get_entity)) {
+      // Deadlock or timeout is ok, when multi get is tested. Because multi get
+      // tests execute MaybeAddKeyToTxnForRYW function which writes to the
+      // same key space but does not acquire stress test level mutex. So it is
+      // possible RocksDB returns deadlock or timeout. Return OK() for these
+      // cases
+      pending_expected_value.Rollback();
+      return Status::OK();
+    }
 
     if (!s.ok()) {
       pending_expected_value.Rollback();
