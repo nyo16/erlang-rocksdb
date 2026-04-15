@@ -1,5 +1,9 @@
 ## erlang-rocksdb 2.7.0, released on 2026/04/15
 
+### Bug Fixes
+
+- fix `blob_file_size` CF option being incorrectly assigned to `ColumnFamilyOptions::min_blob_size` (copy-paste typo from the adjacent `min_blob_size` handler). The option now sets `ColumnFamilyOptions::blob_file_size` as documented.
+
 ### Improvements
 
 - bump to RocksDB version [11.0.4](https://github.com/facebook/rocksdb/releases/tag/v11.0.4)
@@ -10,7 +14,7 @@
 ### Wrapper-side changes required by RocksDB 11.x
 
 - `c_src/erocksdb_db.cc`: `DB::Open` / `DB::OpenForReadOnly` now require `std::unique_ptr<DB>*` instead of `DB**`. Updated both `Open` and `OpenWithCf` paths to use `std::unique_ptr<rocksdb::DB>` + `release()` so the existing `DbObject` raw-pointer ownership model is preserved.
-- `c_src/statistics.cc`: `BLOB_DB_WRITE_INLINED` / `BLOB_DB_WRITE_INLINED_TTL` were renamed to `BLOB_DB_WRITE_INLINED_DEPRECATED` / `BLOB_DB_WRITE_INLINED_TTL_DEPRECATED` upstream (kept for ABI stability, no longer incremented because `min_blob_size` is no longer configurable). The Erlang atoms `blob_db_write_inlined` and `blob_db_write_inlined_ttl` still resolve, but the counters they map to are now always zero. Consider removing them in a future release.
+- `c_src/statistics.cc`: the **legacy** BlobDB tickers `BLOB_DB_WRITE_INLINED` / `BLOB_DB_WRITE_INLINED_TTL` were renamed to `BLOB_DB_WRITE_INLINED_DEPRECATED` / `BLOB_DB_WRITE_INLINED_TTL_DEPRECATED` upstream (kept for ABI stability, no longer incremented because the legacy BlobDB's `min_blob_size` is no longer configurable). This does **not** affect the **integrated** BlobDB's `ColumnFamilyOptions::min_blob_size`, which the wrapper exposes via the `min_blob_size` CF option and which remains fully configurable. The Erlang atoms `blob_db_write_inlined` and `blob_db_write_inlined_ttl` still resolve, but the counters they map to are now always zero. Consider removing them in a future release.
 - `src/rocksdb.erl`: `format_version` typespec updated from `0..5` to `2..7`. RocksDB 11.x drops support for `format_version < 2` (DBs last touched by RocksDB < 4.6 must be fully compacted on an older build before opening with 2.7.0+) and adds 6 and 7 as supported values.
 
 ### Behaviour notes (read before upgrading)
