@@ -76,6 +76,7 @@
 #include "test_util/testutil.h"
 #include "util/coding.h"
 #include "util/compression.h"
+#include "util/defer.h"
 #include "util/file_checksum_helper.h"
 #include "util/random.h"
 #include "util/string_util.h"
@@ -582,18 +583,16 @@ class DBConstructor : public Constructor {
  public:
   explicit DBConstructor(const Comparator* cmp)
       : Constructor(cmp), comparator_(cmp) {
-    db_ = nullptr;
     NewDB();
   }
-  ~DBConstructor() override { delete db_; }
+  ~DBConstructor() override {}
   Status FinishImpl(const Options& /*options*/,
                     const ImmutableOptions& /*ioptions*/,
                     const MutableCFOptions& /*moptions*/,
                     const BlockBasedTableOptions& /*table_options*/,
                     const InternalKeyComparator& /*internal_comparator*/,
                     const stl_wrappers::KVMap& kv_map) override {
-    delete db_;
-    db_ = nullptr;
+    db_.reset();
     NewDB();
     for (const auto& kv : kv_map) {
       WriteBatch batch;
@@ -608,7 +607,7 @@ class DBConstructor : public Constructor {
     return new InternalIteratorFromIterator(db_->NewIterator(ReadOptions()));
   }
 
-  DB* db() const override { return db_; }
+  DB* db() const override { return db_.get(); }
 
  private:
   void NewDB() {
@@ -627,7 +626,7 @@ class DBConstructor : public Constructor {
   }
 
   const Comparator* comparator_;
-  DB* db_;
+  std::unique_ptr<DB> db_;
 };
 
 enum TestType {
@@ -674,35 +673,6 @@ static std::vector<TestArgs> GenerateArgList() {
   std::vector<int> restart_intervals = {16, 1, 1024};
   std::vector<uint32_t> compression_parallel_threads = {1, 4};
 
-  // Only add compression if it is supported
-  std::vector<std::pair<CompressionType, bool>> compression_types;
-  compression_types.emplace_back(kNoCompression, false);
-  if (Snappy_Supported()) {
-    compression_types.emplace_back(kSnappyCompression, false);
-  }
-  if (Zlib_Supported()) {
-    compression_types.emplace_back(kZlibCompression, false);
-    compression_types.emplace_back(kZlibCompression, true);
-  }
-  if (BZip2_Supported()) {
-    compression_types.emplace_back(kBZip2Compression, false);
-    compression_types.emplace_back(kBZip2Compression, true);
-  }
-  if (LZ4_Supported()) {
-    compression_types.emplace_back(kLZ4Compression, false);
-    compression_types.emplace_back(kLZ4Compression, true);
-    compression_types.emplace_back(kLZ4HCCompression, false);
-    compression_types.emplace_back(kLZ4HCCompression, true);
-  }
-  if (XPRESS_Supported()) {
-    compression_types.emplace_back(kXpressCompression, false);
-    compression_types.emplace_back(kXpressCompression, true);
-  }
-  if (ZSTD_Supported()) {
-    compression_types.emplace_back(kZSTD, false);
-    compression_types.emplace_back(kZSTD, true);
-  }
-
   for (auto test_type : test_types) {
     for (auto reverse_compare : reverse_compare_types) {
       if (test_type == PLAIN_TABLE_SEMI_FIXED_PREFIX ||
@@ -713,9 +683,9 @@ static std::vector<TestArgs> GenerateArgList() {
         one_arg.type = test_type;
         one_arg.reverse_compare = reverse_compare;
         one_arg.restart_interval = restart_intervals[0];
-        one_arg.compression = compression_types[0].first;
+        one_arg.compression = kNoCompression;
         one_arg.compression_parallel_threads = 1;
-        one_arg.format_version = 0;
+        one_arg.format_version = 0;  // Plain tables use their own versioning
         one_arg.use_mmap = true;
         test_args.push_back(one_arg);
         one_arg.use_mmap = false;
@@ -724,17 +694,20 @@ static std::vector<TestArgs> GenerateArgList() {
       }
 
       for (auto restart_interval : restart_intervals) {
-        for (auto compression_type : compression_types) {
+        for (auto compression_type : GetSupportedCompressions()) {
           for (auto num_threads : compression_parallel_threads) {
-            TestArgs one_arg;
-            one_arg.type = test_type;
-            one_arg.reverse_compare = reverse_compare;
-            one_arg.restart_interval = restart_interval;
-            one_arg.compression = compression_type.first;
-            one_arg.compression_parallel_threads = num_threads;
-            one_arg.format_version = compression_type.second ? 2 : 1;
-            one_arg.use_mmap = false;
-            test_args.push_back(one_arg);
+            // format_version = 7 changes some compression handling
+            for (uint32_t fv : {kMinSupportedBbtFormatVersionForRead, 7U}) {
+              TestArgs one_arg;
+              one_arg.type = test_type;
+              one_arg.reverse_compare = reverse_compare;
+              one_arg.restart_interval = restart_interval;
+              one_arg.compression = compression_type;
+              one_arg.compression_parallel_threads = num_threads;
+              one_arg.format_version = fv;
+              one_arg.use_mmap = false;
+              test_args.push_back(one_arg);
+            }
           }
         }
       }
@@ -767,9 +740,6 @@ class FixedOrLessPrefixTransform : public SliceTransform {
 
   bool InDomain(const Slice& /*src*/) const override { return true; }
 
-  bool InRange(const Slice& dst) const override {
-    return (dst.size() <= prefix_len_);
-  }
   bool FullLengthEnabled(size_t* /*len*/) const override { return false; }
 };
 
@@ -1142,7 +1112,7 @@ class GeneralTableTest : public TableTest {};
 class BlockBasedTableTestBase : public TableTest {};
 class BlockBasedTableTest : public BlockBasedTableTestBase,
                             virtual public ::testing::WithParamInterface<
-                                std::tuple<uint32_t, size_t, size_t>> {
+                                std::tuple<uint32_t, size_t, size_t, bool>> {
  public:
   BlockBasedTableTest() : format_(std::get<0>(GetParam())) {
     env_ = Env::Default();
@@ -1154,6 +1124,8 @@ class BlockBasedTableTest : public BlockBasedTableTestBase,
     auto param = GetParam();
     options.super_block_alignment_size = std::get<1>(param);
     options.super_block_alignment_space_overhead_ratio = std::get<2>(param);
+    // separate_key_value_in_data_block
+    options.separate_key_value_in_data_block = std::get<3>(param);
     return options;
   }
 
@@ -1390,7 +1362,7 @@ INSTANTIATE_TEST_CASE_P(
     testing::Combine(testing::ValuesIn(test::kFooterFormatVersionsToTest),
                      testing::Values(0, 128 * 1024, 512 * 1024,
                                      2 * 1024 * 1024),
-                     testing::Values(2048, 32, 128)));
+                     testing::Values(2048, 32, 128), testing::Bool()));
 
 // This test serves as the living tutorial for the prefix scan of user collected
 // properties.
@@ -1760,7 +1732,13 @@ TEST_P(BlockBasedTableTest, BasicBlockBasedTableProperties) {
   ASSERT_EQ("", props.filter_policy_name);  // no filter policy is used
 
   // Verify data size.
-  BlockBuilder block_builder(1);
+  BlockBuilder block_builder(
+      1 /* block_restart_interval */, true /* use_delta_encoding */,
+      false /* use_value_delta_encoding */,
+      BlockBasedTableOptions::kDataBlockBinarySearch /* index_type */,
+      0.75 /* data_block_hash_table_util_ratio */, 0 /* ts_sz */,
+      true /* persist_user_defined_timestamps */, false /* is_user_key */,
+      table_options.separate_key_value_in_data_block);
   for (const auto& item : kvmap) {
     block_builder.Add(item.first, item.second);
   }
@@ -2305,6 +2283,44 @@ TEST_P(BlockBasedTableTest, BadChecksumType) {
             "Corruption: Corrupt or unsupported checksum type: 123 in test");
 }
 
+TEST_P(BlockBasedTableTest, ReservedBitInDataBlockFooter) {
+  // Test that reserved metadata bits in data block footer are detected.
+  // We construct a block directly rather than going through the full table
+  // iterator path to avoid issues with iterator error handling.
+
+  // Build a simple data block
+  BlockBuilder builder(16 /* restart_interval */);
+  InternalKey key("abc", 1, kTypeValue);
+  builder.Add(key.Encode(), "test_value");
+  Slice block_contents = builder.Finish();
+  std::string block_data = block_contents.ToString();
+
+  // The footer is the last 4 bytes - corrupt it by setting reserved bit 29
+  ASSERT_GE(block_data.size(), sizeof(uint32_t));
+  size_t footer_offset = block_data.size() - sizeof(uint32_t);
+  uint32_t footer = DecodeFixed32(block_data.data() + footer_offset);
+  footer |= (1u << 29);  // Set a reserved bit
+  EncodeFixed32(&block_data[footer_offset], footer);
+
+  // Try to construct a Block from the corrupted data
+  BlockContents contents(std::move(block_data));
+  Block block(std::move(contents), 0 /* read_amp_bytes_per_bit */);
+
+  // Block should have size() == 0 indicating error
+  ASSERT_EQ(block.size(), 0u);
+
+  // Try to get an iterator - it should be invalid with corruption status
+  DataBlockIter iter;
+  block.NewDataIterator(BytewiseComparator(), kMaxSequenceNumber, &iter,
+                        /*stats=*/nullptr, /*block_contents_pinned=*/false);
+  ASSERT_FALSE(iter.Valid());
+  ASSERT_EQ(iter.status().code(), Status::kCorruption)
+      << iter.status().ToString();
+  ASSERT_NE(iter.status().ToString().find("reserved bits set"),
+            std::string::npos)
+      << iter.status().ToString();
+}
+
 class BuiltinChecksumTest : public testing::Test,
                             public testing::WithParamInterface<ChecksumType> {};
 
@@ -2676,9 +2692,18 @@ void TableTest::IndexTest(BlockBasedTableOptions table_options) {
   c.ResetTableReader();
 }
 
-TEST_P(BlockBasedTableTest, BinaryIndexTest) {
+TEST_P(BlockBasedTableTest, BinaryIndexTestBinarySearch) {
   BlockBasedTableOptions table_options = GetBlockBasedTableOptions();
   table_options.index_type = BlockBasedTableOptions::kBinarySearch;
+  table_options.index_block_search_type = BlockBasedTableOptions::kBinary;
+  IndexTest(table_options);
+}
+
+TEST_P(BlockBasedTableTest, BinaryIndexTestInterpolationSearch) {
+  BlockBasedTableOptions table_options = GetBlockBasedTableOptions();
+  table_options.index_type = BlockBasedTableOptions::kBinarySearch;
+  table_options.index_block_search_type =
+      BlockBasedTableOptions::kInterpolation;
   IndexTest(table_options);
 }
 
@@ -5002,30 +5027,11 @@ TEST(TableTest, FooterTests) {
   BlockHandle meta_index(data_size + index_size + 2 * 5, metaindex_size);
   uint64_t footer_offset = data_size + metaindex_size + index_size + 3 * 5;
   uint32_t base_context_checksum = 123456789;
-  {
-    // legacy block based
-    FooterBuilder footer;
-    ASSERT_OK(footer.Build(kBlockBasedTableMagicNumber, /* format_version */ 0,
-                           footer_offset, kCRC32c, meta_index, index));
-    Footer decoded_footer;
-    ASSERT_OK(decoded_footer.DecodeFrom(footer.GetSlice(), footer_offset));
-    ASSERT_EQ(decoded_footer.table_magic_number(), kBlockBasedTableMagicNumber);
-    ASSERT_EQ(decoded_footer.checksum_type(), kCRC32c);
-    ASSERT_EQ(decoded_footer.metaindex_handle().offset(), meta_index.offset());
-    ASSERT_EQ(decoded_footer.metaindex_handle().size(), meta_index.size());
-    ASSERT_EQ(decoded_footer.index_handle().offset(), index.offset());
-    ASSERT_EQ(decoded_footer.index_handle().size(), index.size());
-    ASSERT_EQ(decoded_footer.format_version(), 0U);
-    ASSERT_EQ(decoded_footer.base_context_checksum(), 0U);
-    ASSERT_EQ(decoded_footer.GetBlockTrailerSize(), 5U);
-    // Ensure serialized with legacy magic
-    ASSERT_EQ(
-        DecodeFixed64(footer.GetSlice().data() + footer.GetSlice().size() - 8),
-        kLegacyBlockBasedTableMagicNumber);
-  }
-  // block based, various checksums, various versions
+  // block based, various checksums, various versions (format_version >= 2)
   for (auto t : GetSupportedChecksums()) {
-    for (uint32_t fv = 1; IsSupportedFormatVersion(fv); ++fv) {
+    for (uint32_t fv = kMinSupportedBbtFormatVersionForWrite;
+         IsSupportedFormatVersionForWrite(kBlockBasedTableMagicNumber, fv);
+         ++fv) {
       uint32_t maybe_bcc =
           FormatVersionUsesContextChecksum(fv) ? base_context_checksum : 0U;
       FooterBuilder footer;
@@ -5072,41 +5078,154 @@ TEST(TableTest, FooterTests) {
     }
   }
 
+  // plain table, various checksums, various versions (format_version >= 2)
+  // Plain tables have no block trailer (size 0), so set up separate handles
+  // Note: format_version >= 6 has complex footer checksum requirements,
+  // so we only test format_version 2-5 for plain tables here
   {
-    // legacy plain table
-    FooterBuilder footer;
-    ASSERT_OK(footer.Build(kPlainTableMagicNumber, /* format_version */ 0,
-                           footer_offset, kNoChecksum, meta_index));
-    Footer decoded_footer;
-    ASSERT_OK(decoded_footer.DecodeFrom(footer.GetSlice(), footer_offset));
-    ASSERT_EQ(decoded_footer.table_magic_number(), kPlainTableMagicNumber);
-    ASSERT_EQ(decoded_footer.checksum_type(), kCRC32c);
-    ASSERT_EQ(decoded_footer.metaindex_handle().offset(), meta_index.offset());
-    ASSERT_EQ(decoded_footer.metaindex_handle().size(), meta_index.size());
-    ASSERT_EQ(decoded_footer.index_handle().offset(), 0U);
-    ASSERT_EQ(decoded_footer.index_handle().size(), 0U);
-    ASSERT_EQ(decoded_footer.format_version(), 0U);
-    ASSERT_EQ(decoded_footer.GetBlockTrailerSize(), 0U);
-    // Ensure serialized with legacy magic
-    ASSERT_EQ(
-        DecodeFixed64(footer.GetSlice().data() + footer.GetSlice().size() - 8),
-        kLegacyPlainTableMagicNumber);
+    uint64_t plain_metaindex_size = r->Uniform(1000000);
+    // For plain tables: metaindex is at offset 0, footer immediately follows
+    BlockHandle plain_meta_index(0, plain_metaindex_size);
+    uint64_t plain_footer_offset = plain_metaindex_size;
+    for (auto t : GetSupportedChecksums()) {
+      for (uint32_t fv = kMinSupportedBbtFormatVersionForWrite; fv < 6; ++fv) {
+        FooterBuilder footer;
+        ASSERT_OK(footer.Build(kPlainTableMagicNumber, fv, plain_footer_offset,
+                               t, plain_meta_index));
+        Footer decoded_footer;
+        ASSERT_OK(
+            decoded_footer.DecodeFrom(footer.GetSlice(), plain_footer_offset));
+        ASSERT_EQ(decoded_footer.table_magic_number(), kPlainTableMagicNumber);
+        ASSERT_EQ(decoded_footer.checksum_type(), t);
+        ASSERT_EQ(decoded_footer.metaindex_handle().offset(),
+                  plain_meta_index.offset());
+        ASSERT_EQ(decoded_footer.metaindex_handle().size(),
+                  plain_meta_index.size());
+        ASSERT_EQ(decoded_footer.format_version(), fv);
+        ASSERT_EQ(decoded_footer.GetBlockTrailerSize(), 0U);
+      }
+    }
   }
+}
+
+// Test that legacy SST formats (format_version < 2) are properly rejected
+TEST(TableTest, LegacyFormatRejectionTests) {
+  // Temporarily disable unsupported format version allowance for this test
+  bool& allow = TEST_AllowUnsupportedFormatVersion();
+  SaveAndRestore<bool> saved_allow(&allow, false);
+
+  // Test legacy block-based magic number from LevelDB should be rejected
   {
-    // xxhash plain table (not currently used)
-    FooterBuilder footer;
-    ASSERT_OK(footer.Build(kPlainTableMagicNumber, /* format_version */ 1,
-                           footer_offset, kxxHash, meta_index));
+    // Construct a fake footer with legacy block-based magic number
+    std::array<char, Footer::kVersion0EncodedLength> fake_footer;
+    std::fill(fake_footer.begin(), fake_footer.end(), 0);
+    // Put legacy magic number at the end
+    EncodeFixed64(fake_footer.data() + fake_footer.size() - 8,
+                  0xdb4775248b80fb57ull /*legacy magic number*/);
+
     Footer decoded_footer;
-    ASSERT_OK(decoded_footer.DecodeFrom(footer.GetSlice(), footer_offset));
-    ASSERT_EQ(decoded_footer.table_magic_number(), kPlainTableMagicNumber);
-    ASSERT_EQ(decoded_footer.checksum_type(), kxxHash);
-    ASSERT_EQ(decoded_footer.metaindex_handle().offset(), meta_index.offset());
-    ASSERT_EQ(decoded_footer.metaindex_handle().size(), meta_index.size());
-    ASSERT_EQ(decoded_footer.index_handle().offset(), 0U);
-    ASSERT_EQ(decoded_footer.index_handle().size(), 0U);
-    ASSERT_EQ(decoded_footer.format_version(), 1U);
-    ASSERT_EQ(decoded_footer.GetBlockTrailerSize(), 0U);
+    Status s = decoded_footer.DecodeFrom(
+        Slice(fake_footer.data(), fake_footer.size()), 0);
+    ASSERT_TRUE(s.IsNotSupported()) << s.ToString();
+    ASSERT_TRUE(s.ToString().find("nsupported legacy magic number") !=
+                std::string::npos)
+        << s.ToString();
+    ASSERT_TRUE(s.ToString().find("full compaction") != std::string::npos)
+        << s.ToString();
+  }
+
+  // Test format_version=1 with new magic number should be rejected
+  {
+    std::array<char, Footer::kNewVersionsEncodedLength> fake_footer;
+    std::fill(fake_footer.begin(), fake_footer.end(), 0);
+    // Part 1: checksum type
+    fake_footer[0] = kCRC32c;
+    // Part 3: format_version=1 and new magic number
+    char* part3 = fake_footer.data() + fake_footer.size() - 12;
+    EncodeFixed32(part3, 1);  // format_version = 1
+    EncodeFixed64(part3 + 4, kBlockBasedTableMagicNumber);
+
+    Footer decoded_footer;
+    Status s = decoded_footer.DecodeFrom(
+        Slice(fake_footer.data(), fake_footer.size()), 0);
+    // format_version=1 is not supported for read, should return Corruption
+    ASSERT_TRUE(s.IsCorruption()) << s.ToString();
+    ASSERT_TRUE(s.ToString().find("format_version") != std::string::npos)
+        << s.ToString();
+  }
+
+  // Test format_version=0 with new magic number should be rejected
+  {
+    std::array<char, Footer::kNewVersionsEncodedLength> fake_footer;
+    std::fill(fake_footer.begin(), fake_footer.end(), 0);
+    // Part 1: checksum type
+    fake_footer[0] = kCRC32c;
+    // Part 3: format_version=0 and new magic number
+    char* part3 = fake_footer.data() + fake_footer.size() - 12;
+    EncodeFixed32(part3, 0);  // format_version = 0
+    EncodeFixed64(part3 + 4, kBlockBasedTableMagicNumber);
+
+    Footer decoded_footer;
+    Status s = decoded_footer.DecodeFrom(
+        Slice(fake_footer.data(), fake_footer.size()), 0);
+    // format_version=0 is not supported for read, should return Corruption
+    ASSERT_TRUE(s.IsCorruption()) << s.ToString();
+    ASSERT_TRUE(s.ToString().find("format_version") != std::string::npos)
+        << s.ToString();
+  }
+}
+
+// Test that configuring unsupported format_version for writing is sanitized
+// or rejected as appropriate
+TEST(TableTest, UnsupportedFormatVersionConfigTest) {
+  // Temporarily disable unsupported format version allowance for this test
+  bool& allow = TEST_AllowUnsupportedFormatVersion();
+  SaveAndRestore<bool> saved_allow(&allow, false);
+
+  // Test that format_version < kMinSupportedBbtFormatVersionForWrite is
+  // sanitized to kMinSupportedBbtFormatVersionForWrite during initialization
+  for (uint32_t fv = 0; fv < kMinSupportedBbtFormatVersionForWrite; ++fv) {
+    BlockBasedTableOptions table_options;
+    table_options.format_version = fv;
+    BlockBasedTableFactory factory(table_options);
+
+    // After construction, format_version should be sanitized
+    auto* opts = factory.GetOptions<BlockBasedTableOptions>();
+    ASSERT_EQ(opts->format_version, kMinSupportedBbtFormatVersionForWrite)
+        << "format_version=" << fv << " should be sanitized to "
+        << kMinSupportedBbtFormatVersionForWrite;
+  }
+
+  // Test that supported format versions are not changed
+  for (uint32_t fv = kMinSupportedBbtFormatVersionForWrite;
+       IsSupportedFormatVersionForWrite(kBlockBasedTableMagicNumber, fv);
+       ++fv) {
+    BlockBasedTableOptions table_options;
+    table_options.format_version = fv;
+    BlockBasedTableFactory factory(table_options);
+
+    auto* opts = factory.GetOptions<BlockBasedTableOptions>();
+    ASSERT_EQ(opts->format_version, fv)
+        << "format_version=" << fv << " should not be changed";
+
+    ColumnFamilyOptions cf_opts;
+    DBOptions db_opts;
+    Status s = factory.ValidateOptions(db_opts, cf_opts);
+    ASSERT_OK(s) << "format_version=" << fv << ": " << s.ToString();
+  }
+
+  // Test that format_version > kLatestBbtFormatVersion is rejected by
+  // ValidateOptions (not sanitized, since it could be a future version that
+  // requires newer code)
+  {
+    BlockBasedTableOptions table_options;
+    table_options.format_version = kLatestBbtFormatVersion + 1;
+    BlockBasedTableFactory factory(table_options);
+
+    ColumnFamilyOptions cf_opts;
+    DBOptions db_opts;
+    Status s = factory.ValidateOptions(db_opts, cf_opts);
+    ASSERT_TRUE(s.IsInvalidArgument()) << s.ToString();
   }
 }
 
@@ -5211,10 +5330,6 @@ class TestPrefixExtractor : public ROCKSDB_NAMESPACE::SliceTransform {
     return IsValid(src);
   }
 
-  bool InRange(const ROCKSDB_NAMESPACE::Slice& /*dst*/) const override {
-    return true;
-  }
-
   bool IsValid(const ROCKSDB_NAMESPACE::Slice& src) const {
     if (src.size() != 4) {
       return false;
@@ -5252,7 +5367,7 @@ TEST_F(PrefixTest, PrefixAndWholeKeyTest) {
   const std::string kDBPath = test::PerThreadDBPath("table_prefix_test");
   options.table_factory.reset(NewBlockBasedTableFactory(bbto));
   ASSERT_OK(DestroyDB(kDBPath, options));
-  ROCKSDB_NAMESPACE::DB* db;
+  std::unique_ptr<ROCKSDB_NAMESPACE::DB> db;
   ASSERT_OK(ROCKSDB_NAMESPACE::DB::Open(options, kDBPath, &db));
 
   // Create a bunch of keys with 10 filters.
@@ -5266,7 +5381,7 @@ TEST_F(PrefixTest, PrefixAndWholeKeyTest) {
 
   // Trigger compaction.
   ASSERT_OK(db->CompactRange(CompactRangeOptions(), nullptr, nullptr));
-  delete db;
+  db.reset();
   // In the second round, turn whole_key_filtering off and expect
   // rocksdb still works.
 }
@@ -5572,7 +5687,7 @@ TEST_P(BlockBasedTableTest, FixBlockAlignMismatchedFileChecksums) {
   const std::string kDBPath =
       test::PerThreadDBPath("block_align_padded_bytes_verify_file_checksums");
   ASSERT_OK(DestroyDB(kDBPath, options));
-  DB* db;
+  std::unique_ptr<DB> db;
   ASSERT_OK(DB::Open(options, kDBPath, &db));
   ASSERT_OK(db->Put(WriteOptions(), "k1", "v1"));
   ASSERT_OK(db->Flush(FlushOptions()));
@@ -5580,7 +5695,7 @@ TEST_P(BlockBasedTableTest, FixBlockAlignMismatchedFileChecksums) {
   // aligning blocks are used to generate the checksum to compare against the
   // one not generated by padded bytes
   ASSERT_OK(db->VerifyFileChecksums(ReadOptions()));
-  delete db;
+  db.reset();
 }
 
 class NoBufferAlignmenttWritableFile : public FSWritableFileOwnerWrapper {
@@ -5635,7 +5750,7 @@ TEST_P(BlockBasedTableTest,
   const std::string kDBPath = test::PerThreadDBPath(
       "block_align_flush_during_flush_verify_file_checksums");
   ASSERT_OK(DestroyDB(kDBPath, options));
-  DB* db;
+  std::unique_ptr<DB> db;
   ASSERT_OK(DB::Open(options, kDBPath, &db));
 
   ASSERT_OK(db->Put(WriteOptions(), "k1", "k2"));
@@ -5644,7 +5759,7 @@ TEST_P(BlockBasedTableTest,
   // Before the fix, VerifyFileChecksums() will fail as incorrect padded bytes
   // were used to generate checksum upon file creation
   ASSERT_OK(db->VerifyFileChecksums(ReadOptions()));
-  delete db;
+  db.reset();
 }
 
 TEST_P(BlockBasedTableTest, PropertiesBlockRestartPointTest) {
@@ -5707,8 +5822,7 @@ TEST_P(BlockBasedTableTest, PropertiesBlockRestartPointTest) {
       read_options_for_helper.verify_checksums = false;
       PersistentCacheOptions cache_options;
 
-      auto mgr = GetBuiltinCompressionManager(
-          GetCompressFormatForVersion(footer.format_version()));
+      auto mgr = GetBuiltinV2CompressionManager();
       BlockFetcher block_fetcher(file, nullptr /* prefetch_buffer */, footer,
                                  read_options_for_helper, handle, contents,
                                  ioptions, false /* decompress */,
@@ -5846,8 +5960,7 @@ TEST_P(BlockBasedTableTest, PropertiesMetaBlockLast) {
   auto metaindex_handle = footer.metaindex_handle();
   BlockContents metaindex_contents;
   PersistentCacheOptions pcache_opts;
-  auto mgr = GetBuiltinCompressionManager(
-      GetCompressFormatForVersion(footer.format_version()));
+  auto mgr = GetBuiltinV2CompressionManager();
   BlockFetcher block_fetcher(
       table_reader.get(), nullptr /* prefetch_buffer */, footer, ReadOptions(),
       metaindex_handle, &metaindex_contents, ioptions, false /* decompress */,
@@ -5929,8 +6042,7 @@ TEST_P(BlockBasedTableTest, SeekMetaBlocks) {
   auto metaindex_handle = footer.metaindex_handle();
   BlockContents metaindex_contents;
   PersistentCacheOptions pcache_opts;
-  auto mgr = GetBuiltinCompressionManager(
-      GetCompressFormatForVersion(footer.format_version()));
+  auto mgr = GetBuiltinV2CompressionManager();
   BlockFetcher block_fetcher(
       table_reader.get(), nullptr /* prefetch_buffer */, footer, ReadOptions(),
       metaindex_handle, &metaindex_contents, ioptions, false /* decompress */,
@@ -5980,27 +6092,25 @@ TEST_P(BlockBasedTableTest, BadOptions) {
   options.table_factory.reset(NewBlockBasedTableFactory(bbto));
   ASSERT_OK(DestroyDB(kDBPath, options));
 
-  std::unique_ptr<DB> db;
   {
-    ROCKSDB_NAMESPACE::DB* _db;
-    ASSERT_NOK(ROCKSDB_NAMESPACE::DB::Open(options, kDBPath, &_db));
+    std::unique_ptr<ROCKSDB_NAMESPACE::DB> db;
+    ASSERT_NOK(ROCKSDB_NAMESPACE::DB::Open(options, kDBPath, &db));
 
     bbto.block_size = 4096;
     options.compression = kSnappyCompression;
     options.table_factory.reset(NewBlockBasedTableFactory(bbto));
-    ASSERT_NOK(ROCKSDB_NAMESPACE::DB::Open(options, kDBPath, &_db));
+    ASSERT_NOK(ROCKSDB_NAMESPACE::DB::Open(options, kDBPath, &db));
 
     options.compression = kNoCompression;
     options.bottommost_compression = kSnappyCompression;
-    ASSERT_NOK(ROCKSDB_NAMESPACE::DB::Open(options, kDBPath, &_db));
+    ASSERT_NOK(ROCKSDB_NAMESPACE::DB::Open(options, kDBPath, &db));
 
     options.bottommost_compression = kNoCompression;
     options.compression_per_level.emplace_back(kSnappyCompression);
-    ASSERT_NOK(ROCKSDB_NAMESPACE::DB::Open(options, kDBPath, &_db));
+    ASSERT_NOK(ROCKSDB_NAMESPACE::DB::Open(options, kDBPath, &db));
 
     options.compression_per_level.clear();
-    ASSERT_OK(ROCKSDB_NAMESPACE::DB::Open(options, kDBPath, &_db));
-    db.reset(_db);
+    ASSERT_OK(ROCKSDB_NAMESPACE::DB::Open(options, kDBPath, &db));
   }
 }
 
@@ -6235,6 +6345,46 @@ TEST_P(BlockBasedTableTest, OutOfBoundOnNext) {
   iter->Next();
   ASSERT_FALSE(iter->Valid());
   ASSERT_FALSE(iter->UpperBoundCheckResult() == IterBoundCheck::kOutOfBound);
+}
+
+// Test that a single large entry with value larger than block size works
+TEST_P(BlockBasedTableTest, SingleLargeEntry) {
+  TableConstructor c(BytewiseComparator(), true /* convert_to_internal_key_ */);
+  Options options;
+  BlockBasedTableOptions table_options = GetBlockBasedTableOptions();
+
+  // Set a small block size
+  constexpr size_t kBlockSize = 1024;
+  table_options.block_size = kBlockSize;
+  options.table_factory.reset(NewBlockBasedTableFactory(table_options));
+  options.compression = kNoCompression;
+
+  // Create a value that is larger than the block size
+  const size_t kLargeValueSize = kBlockSize * 4;
+  std::string large_value(kLargeValueSize, 'x');
+  c.Add("key1", large_value);
+
+  std::vector<std::string> keys;
+  stl_wrappers::KVMap kvmap;
+  const ImmutableOptions ioptions(options);
+  const MutableCFOptions moptions(options);
+  c.Finish(options, ioptions, moptions, table_options,
+           GetPlainInternalComparator(options.comparator), &keys, &kvmap);
+
+  auto* reader = c.GetTableReader();
+  ReadOptions read_options;
+  std::unique_ptr<InternalIterator> iter(reader->NewIterator(
+      read_options, moptions.prefix_extractor.get(), /*arena=*/nullptr,
+      /*skip_filters=*/false, TableReaderCaller::kUncategorized));
+
+  iter->SeekToFirst();
+  ASSERT_TRUE(iter->Valid());
+  ASSERT_OK(iter->status());
+  ASSERT_EQ(large_value, iter->value().ToString());
+
+  iter->Next();
+  ASSERT_FALSE(iter->Valid());
+  ASSERT_OK(iter->status());
 }
 
 class ChargeCompressionDictionaryBuildingBufferTest

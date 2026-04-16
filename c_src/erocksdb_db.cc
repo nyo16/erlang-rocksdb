@@ -882,7 +882,7 @@ ERL_NIF_TERM parse_cf_option(ErlNifEnv* env, ERL_NIF_TERM item, rocksdb::ColumnF
         {
           ErlNifUInt64 blob_file_size;
           if (enif_get_uint64(env, option[1], &blob_file_size))
-            opts.min_blob_size = blob_file_size;
+            opts.blob_file_size = blob_file_size;
         }
         else if(option[0] == erocksdb::ATOM_BLOB_COMPRESSION_TYPE)
         {
@@ -1155,7 +1155,7 @@ Open(
 {
     char db_name[4096];
     DbObject * db_ptr;
-    rocksdb::DB *db(0);
+    std::unique_ptr<rocksdb::DB> db_uptr;
 
 
     if(!enif_get_string(env, argv[0], db_name, sizeof(db_name), ERL_NIF_LATIN1) ||
@@ -1176,9 +1176,9 @@ Open(
     rocksdb::Options *opts = new rocksdb::Options(*db_opts, *cf_opts);
     rocksdb::Status status;
     if (read_only) {
-        status = rocksdb::DB::OpenForReadOnly(*opts, db_name, &db);
+        status = rocksdb::DB::OpenForReadOnly(*opts, db_name, &db_uptr);
     } else {
-        status = rocksdb::DB::Open(*opts, db_name, &db);
+        status = rocksdb::DB::Open(*opts, db_name, &db_uptr);
     }
     delete opts;
     delete db_opts;
@@ -1187,7 +1187,7 @@ Open(
     if(!status.ok())
         return error_tuple(env, ATOM_ERROR_DB_OPEN, status);
 
-    db_ptr = DbObject::CreateDbObject(std::move(db));
+    db_ptr = DbObject::CreateDbObject(db_uptr.release());
     ERL_NIF_TERM result = enif_make_resource(env, db_ptr);
     enif_release_resource(db_ptr);
     return enif_make_tuple2(env, ATOM_OK, result);
@@ -1221,7 +1221,7 @@ OpenWithCf(
 {
     char db_name[4096];
     DbObject * db_ptr;
-    rocksdb::DB *db(0);
+    std::unique_ptr<rocksdb::DB> db_uptr;
 
 
     if(!enif_get_string(env, argv[0], db_name, sizeof(db_name), ERL_NIF_LATIN1) ||
@@ -1248,15 +1248,15 @@ OpenWithCf(
     std::vector<rocksdb::ColumnFamilyHandle*> handles;
     rocksdb::Status status;
     if (read_only) {
-        status = rocksdb::DB::OpenForReadOnly(db_opts, db_name, column_families, &handles, &db);
+        status = rocksdb::DB::OpenForReadOnly(db_opts, db_name, column_families, &handles, &db_uptr);
     } else {
-        status = rocksdb::DB::Open(db_opts, db_name, column_families, &handles, &db);
+        status = rocksdb::DB::Open(db_opts, db_name, column_families, &handles, &db_uptr);
     }
 
     if(!status.ok())
         return error_tuple(env, ATOM_ERROR_DB_OPEN, status);
 
-    db_ptr = DbObject::CreateDbObject(std::move(db));
+    db_ptr = DbObject::CreateDbObject(db_uptr.release());
 
     ERL_NIF_TERM result = enif_make_resource(env, db_ptr);
 

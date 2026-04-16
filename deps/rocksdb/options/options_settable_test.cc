@@ -182,6 +182,7 @@ TEST_F(OptionsSettableTest, BlockBasedTableOptionsAllFieldsSettable) {
       "pin_l0_filter_and_index_blocks_in_cache=1;"
       "pin_top_level_index_and_filter=1;"
       "index_type=kHashSearch;"
+      "index_block_search_type=kBinary;"
       "data_block_index_type=kDataBlockBinaryAndHash;"
       "index_shortening=kNoShortening;"
       "data_block_hash_table_util_ratio=0.75;"
@@ -206,7 +207,8 @@ TEST_F(OptionsSettableTest, BlockBasedTableOptionsAllFieldsSettable) {
       "prepopulate_block_cache=kDisable;"
       "initial_auto_readahead_size=0;"
       "num_file_reads_for_auto_readahead=0;"
-      "fail_if_no_udi_on_open=true",
+      "fail_if_no_udi_on_open=true;"
+      "separate_key_value_in_data_block=true",
       new_bbto));
 
   ASSERT_EQ(unset_bytes_base,
@@ -292,7 +294,8 @@ TEST_F(OptionsSettableTest, TablePropertiesAllFieldsSettable) {
       "name=64656661756C74;user_defined_timestamps_persisted=1;num_entries=100;"
       "external_sst_file_global_seqno_offset=0;num_merge_operands=0;index_key_"
       "is_user_key=0;key_largest_seqno=18446744073709551615;key_smallest_seqno="
-      "18;",
+      "18;data_block_restart_interval=16;index_block_restart_interval=1;"
+      "separate_key_value_in_data_block=0;",
       new_tp));
 
   // All bytes are set from the parse
@@ -406,7 +409,6 @@ TEST_F(OptionsSettableTest, DBOptionsAllFieldsSettable) {
                              "compaction_readahead_size=0;"
                              "keep_log_file_num=4890;"
                              "skip_stats_update_on_db_open=false;"
-                             "skip_checking_sst_file_sizes_on_db_open=false;"
                              "max_manifest_file_size=4295009941;"
                              "max_manifest_space_amp_pct=321;"
                              "db_log_dir=path/to/db_log_dir;"
@@ -508,7 +510,7 @@ TEST_F(OptionsSettableTest, ColumnFamilyOptionsAllFieldsSettable) {
   // ColumnFamilyOptions.
   const OffsetGap kColumnFamilyOptionsExcluded = {
       {offsetof(struct ColumnFamilyOptions, inplace_callback),
-       sizeof(UpdateStatus(*)(char*, uint32_t*, Slice, std::string*))},
+       sizeof(UpdateStatus (*)(char*, uint32_t*, Slice, std::string*))},
       {offsetof(struct ColumnFamilyOptions,
                 memtable_insert_with_hint_prefix_extractor),
        sizeof(std::shared_ptr<const SliceTransform>)},
@@ -541,8 +543,6 @@ TEST_F(OptionsSettableTest, ColumnFamilyOptionsAllFieldsSettable) {
        sizeof(std::shared_ptr<CompressionManager>)},
       {offsetof(struct ColumnFamilyOptions, prefix_extractor),
        sizeof(std::shared_ptr<const SliceTransform>)},
-      {offsetof(struct ColumnFamilyOptions, snap_refresh_nanos),
-       sizeof(uint64_t)},
       {offsetof(struct ColumnFamilyOptions, table_factory),
        sizeof(std::shared_ptr<TableFactory>)},
       {offsetof(struct ColumnFamilyOptions, cf_paths),
@@ -677,7 +677,8 @@ TEST_F(OptionsSettableTest, ColumnFamilyOptionsAllFieldsSettable) {
       "preserve_internal_time_seconds=86400;"
       "compaction_options_fifo={max_table_files_size=3;allow_"
       "compaction=true;age_for_warm=0;file_temperature_age_thresholds={{"
-      "temperature=kCold;age=12345}};};"
+      "temperature=kCold;age=12345}};max_data_files_size=1073741824;"
+      "use_kv_ratio_compaction=false;};"
       "blob_cache=1M;"
       "memtable_protection_bytes_per_key=2;"
       "persist_user_defined_timestamps=true;"

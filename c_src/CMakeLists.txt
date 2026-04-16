@@ -70,12 +70,12 @@ endif()
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Check for C++20 support (required by RocksDB 10.x)
+# Check for C++20 support (required by RocksDB 11.x)
 include(CheckCXXCompilerFlag)
 CHECK_CXX_COMPILER_FLAG("-std=c++20" COMPILER_SUPPORTS_CXX20)
 if(NOT COMPILER_SUPPORTS_CXX20)
     message(FATAL_ERROR "The compiler ${CMAKE_CXX_COMPILER} does not support C++20. "
-                        "RocksDB 10.x requires C++20. Please use GCC >= 11 or Clang >= 10.")
+                        "RocksDB 11.x requires C++20. Please use GCC >= 11 or Clang >= 10.")
 endif()
 
 if (NOT WIN32)

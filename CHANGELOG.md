@@ -1,3 +1,28 @@
+## erlang-rocksdb 2.7.0, released on 2026/04/15
+
+### Bug Fixes
+
+- fix `blob_file_size` CF option being incorrectly assigned to `ColumnFamilyOptions::min_blob_size` (copy-paste typo from the adjacent `min_blob_size` handler). The option now sets `ColumnFamilyOptions::blob_file_size` as documented.
+
+### Improvements
+
+- bump to RocksDB version [11.0.4](https://github.com/facebook/rocksdb/releases/tag/v11.0.4)
+  - 10.11.0: New `BlockBasedTableOptions::format_version` default flips from 6 to 7; new CF options `separate_key_value_in_data_block` and `index_block_search_type`; multi-CF `SetOptions` API; new FIFO compaction options.
+  - 11.0.0: First major release of the 11.x line. Removes long-deprecated APIs (`DB::Open` raw-pointer overloads, `ReadOptions::managed`, `ColumnFamilyOptions::snap_refresh_nanos`, `SliceTransform::InRange`, `SstFileWriter::Add`, `DBOptions::skip_checking_sst_file_sizes_on_db_open`). Adds `DB::AbortAllCompactions` / `ResumeAllCompactions` and `Status::IsCompactionAborted()`. `CompactionOptionsUniversal::reduce_file_locking` default flips false → true.
+  - 11.0.2 / 11.0.3 / 11.0.4: bug fixes and minor option-sanitization relaxation.
+
+### Wrapper-side changes required by RocksDB 11.x
+
+- `c_src/erocksdb_db.cc`: `DB::Open` / `DB::OpenForReadOnly` now require `std::unique_ptr<DB>*` instead of `DB**`. Updated both `Open` and `OpenWithCf` paths to use `std::unique_ptr<rocksdb::DB>` + `release()` so the existing `DbObject` raw-pointer ownership model is preserved.
+- `c_src/statistics.cc`: the **legacy** BlobDB tickers `BLOB_DB_WRITE_INLINED` / `BLOB_DB_WRITE_INLINED_TTL` were renamed to `BLOB_DB_WRITE_INLINED_DEPRECATED` / `BLOB_DB_WRITE_INLINED_TTL_DEPRECATED` upstream (kept for ABI stability, no longer incremented because the legacy BlobDB's `min_blob_size` is no longer configurable). This does **not** affect the **integrated** BlobDB's `ColumnFamilyOptions::min_blob_size`, which the wrapper exposes via the `min_blob_size` CF option and which remains fully configurable. The Erlang atoms `blob_db_write_inlined` and `blob_db_write_inlined_ttl` still resolve, but the counters they map to are now always zero. Consider removing them in a future release.
+- `src/rocksdb.erl`: `format_version` typespec updated from `0..5` to `2..7`. RocksDB 11.x drops support for `format_version < 2` (DBs last touched by RocksDB < 4.6 must be fully compacted on an older build before opening with 2.7.0+) and adds 6 and 7 as supported values.
+
+### Behaviour notes (read before upgrading)
+
+- **New default `format_version` is 7.** SST files written by erlang-rocksdb 2.7.0 cannot be read by erlang-rocksdb ≤ 2.6.x. If you run a mixed-version cluster, pin `{format_version, 6}` (or lower, down to 2) in your block-based table options until every node has been upgraded.
+- **Pre-4.6 SSTs are unreadable.** If your data was last touched by RocksDB < 4.6 (`format_version < 2`), run a full compaction on a 10.x build before upgrading.
+- **`CompactionOptionsUniversal::reduce_file_locking` default is now true.** No action needed for most users; pin the option explicitly if you depend on the old behaviour.
+
 ## erlang-rocksdb 2.6.2, released on 2026/04/05
 
 ### Bug Fixes
